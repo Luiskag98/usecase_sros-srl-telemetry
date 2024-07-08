@@ -1,0 +1,372 @@
+heat_template_version: 2021-04-16
+
+description: HOT template for Lab usecase_sros-srl-telemetry
+
+parameters:
+
+  bastion_vm_flavor:
+    type: string
+    default: d2.2xlarge
+    description: Flavor Name
+
+
+  bastion_vm_image_id:
+    type: string
+    default: rocky-minimal-automationworks-20240221-1
+    description: Image Name
+
+######################################################################
+
+  #Floating ip subnet (admin)
+  public_net:
+    type: string
+    default: public
+    description: public network id
+
+  #Private network attached on router to external access using Floating ip
+  private_net:
+    type: string
+    description: private net name used to connect with public network
+    default: private
+
+  private_cidr:
+    type: string
+    description: private subnet cidr
+    default: 192.168.10.0/24
+
+  private_gateway_ip:
+    type: string
+    description: private subnet gateway ip
+    default: 192.168.10.1
+
+  private_dns_nameservers:
+    type: comma_delimited_list
+    description: private subnet pool end
+    default: '8.8.8.8'
+
+  private_enable_dhcp:
+    type: boolean
+    description: private subnet cidr
+    default: true
+
+  private_allocation_pools:
+    type: json
+    description: private subnet pool start
+    default:
+        "start": "192.168.10.64"
+        "end": "192.168.10.254"
+
+######################################################################
+
+  lab_mgmt_net:
+    type: string
+    description: Management interface of lab
+    default: lab_mgmt_network
+
+  lab_mgmt_cidr:
+    type: string
+    description: lab management subnet cidr
+    default: 192.168.20.0/24
+
+  lab_mgmt_gateway_ip:
+    type: string
+    description: lab management subnet gateway ip
+    default: 192.168.20.1
+
+  lab_mgmt_dns_nameservers:
+    type: comma_delimited_list
+    description: no dns conf for lab management network
+    #[] value means no dns
+    default: []
+
+  lab_mgmt_enable_dhcp:
+    type: boolean
+    description: lab management dhcp
+    default: false
+
+
+######################################################################
+#---------------------------------------------------------------------
+######################################################################
+
+resources:
+
+  randstr:
+    type: OS::Heat::RandomString
+    properties:
+      character_classes:
+        - class: hexdigits
+      length: 8
+
+################################################################################
+
+  router1:
+    depends_on: [ lab_private_network ]
+    type: OS::Neutron::Router
+    properties:
+      external_gateway_info:
+        network: { get_param: public_net }
+      name: 
+        str_replace:
+          template:
+            $rand-router
+          params:
+            $rand: { get_resource: randstr}
+
+  router1_interface:
+    depends_on: [ lab_private_network, router1 ]
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router1 }
+      #subnet_id: { get_resource: private_subnet }
+      port: { get_resource: router1_private_port }
+
+################################################################################
+
+  lab_private_network:
+    type: OS::Neutron::Net
+    properties:
+      name:
+        str_replace:
+           template:
+              $rand-private-network
+           params:
+              $rand: { get_resource: randstr }
+
+  private_subnet:
+    depends_on: [ lab_private_network ]
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: lab_private_network }
+      cidr: { get_param: private_cidr }
+      enable_dhcp: { get_param: private_enable_dhcp }
+      dns_nameservers: { get_param: private_dns_nameservers }
+      name:
+        str_replace:
+          template:
+            $rand-private-subnet
+          params:
+            $rand: { get_resource: randstr }
+      allocation_pools:
+        - { get_param: private_allocation_pools }
+      gateway_ip: 192.168.10.10
+
+################################################################################
+
+  lab_mgmt_network:
+    type: OS::Neutron::Net
+    properties:
+      name:
+        str_replace:
+           template:
+              $rand-mgmt-network
+           params:
+              $rand: { get_resource: randstr }
+      value_specs:
+        "vlan_transparent": true
+
+  lab_mgmt_subnet:
+    depends_on: [ lab_mgmt_network ]
+    type: OS::Neutron::Subnet
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-mgmt-subnet
+          params:
+            $rand: { get_resource: randstr }
+      network_id: { get_resource: lab_mgmt_network }
+      cidr: { get_param: lab_mgmt_cidr }
+      enable_dhcp: { get_param: lab_mgmt_enable_dhcp }
+      dns_nameservers: { get_param: lab_mgmt_dns_nameservers }
+      gateway_ip: null
+
+################################################################################
+
+  router1_private_port:
+    depends_on: [ lab_private_network  ]
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-router-private-port
+          params:
+            $rand: { get_resource: randstr }
+      network_id: { get_resource: lab_private_network }
+      #security_groups: [ get_resource: bastion_vm_sg ]
+      fixed_ips:
+        #- subnet_id: { get_resource: private_subnet }
+        - ip_address: 192.168.10.10
+
+  bastion_vm_private_port:
+    #depends_on: [ lab_private_network, bastion_vm_sg  ]
+    depends_on: [ lab_private_network  ]
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-bastion-private-port
+          params:
+            $rand: { get_resource: randstr }
+      network_id: { get_resource: lab_private_network }
+      security_groups: [ get_resource: bastion_vm_sg ]
+      fixed_ips:
+        - ip_address: 192.168.10.100
+
+  bastion_vm_mgmt_port:
+    depends_on: [ lab_mgmt_network, randstr ]
+    type: OS::Neutron::Port
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-bastion-mgmt-port
+          params:
+            $rand: { get_resource: randstr }
+      network_id: { get_resource: lab_mgmt_network }
+      port_security_enabled: false
+      fixed_ips:
+        - ip_address: 192.168.20.100
+
+################################################################################
+
+  bastion_vm_sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-bastion_vm_sg
+          params:
+            $rand: { get_resource: randstr }
+      rules:
+      - {direction: ingress, port_range_max: 22, port_range_min: 22, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 443, port_range_min: 443, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 9080, port_range_min: 9080, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 9090, port_range_min: 9090, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 3000, port_range_min: 3000, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 3100, port_range_min: 3100, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 50006, port_range_min: 50001, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 8000, port_range_min: 8000, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 8500, port_range_min: 8500, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, port_range_max: 32483, port_range_min: 32483, protocol: tcp, remote_ip_prefix: 0.0.0.0/0}
+      - {direction: ingress, protocol: icmp, remote_ip_prefix: 0.0.0.0/0}
+
+##############################################################
+
+  bastion_vm_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network_id: { get_param: public_net }
+      #port_id: { get_resource: bastion_vm_private_port }
+
+  association:
+    depends_on: [ bastion_vm_private_port, bastion_vm_floating_ip,router1_interface ]
+    type: OS::Neutron::FloatingIPAssociation
+    properties:
+      floatingip_id: { get_resource: bastion_vm_floating_ip }
+      port_id: {get_resource: bastion_vm_private_port}
+
+##############################################################
+
+  bastion_vm:
+    depends_on: [ bastion_vm_private_port, bastion_vm_mgmt_port ]
+    type: OS::Nova::Server
+    properties:
+      name:
+        str_replace:
+          template:
+            $rand-bastion
+          params:
+            $rand: { get_resource: randstr }
+      image: { get_param: bastion_vm_image_id }
+      flavor: {get_param: bastion_vm_flavor}
+      networks:
+        - port: { get_resource: bastion_vm_private_port }
+        - port: { get_resource: bastion_vm_mgmt_port }
+      user_data_format: RAW
+      user_data:
+        get_resource: bastion_init
+
+##############################################################
+
+  delay_lab:
+      type: OS::Heat::Delay
+      properties:
+        actions: ["CREATE"]
+        jitter_multiplier: 1
+        max_jitter: 90
+        min_wait: 90
+
+  root_pass_config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: ungrouped
+      config:
+        str_replace:
+             template: |
+               #!/bin/sh
+               update-crypto-policies --set DEFAULT:SHA1
+               /usr/sbin/modprobe ip_tables
+               /usr/sbin/modprobe br_netfilter
+               sed -i -e "1i PasswordAuthentication yes" /etc/ssh/sshd_config
+               sed -i -e "1i PermitRootLogin yes" /etc/ssh/sshd_config
+               systemctl restart sshd
+               echo root:$admin_pass | chpasswd
+               mkdir -p /root/.ssh
+               chmod 0700 /root/.ssh
+             params:
+               $admin_pass: { get_attr: [randstr,value] }
+
+  bastion_config:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        write_files:
+          - path: /usr/local/bin/bastion_config.sh
+            owner: root:root
+            permissions: 0700
+            content:
+              str_replace:
+                template: |
+                  #!/bin/sh
+                  $clab_cmd
+                params:
+                  #$ftp_path: { get_param: path_config }
+                  $clab_cmd: "cd /home/automation-works/usecase_sros-srl-telemetry && clab deploy -t st.clab.yml"
+
+        runcmd:
+          - /usr/local/bin/bastion_config.sh
+
+  lnx_install_pkgs:
+    type: OS::Heat::CloudConfig
+    properties:
+      cloud_config:
+        packages:
+          - iperf3
+          - traceroute
+          - nmap
+          - wget
+
+  bastion_init:
+      type: OS::Heat::MultipartMime
+      properties:
+        parts:
+        - config: { get_resource: root_pass_config }
+        - config: { get_resource: bastion_config }
+
+outputs:
+#  bastion_vm_output:
+#    description: Web Console URL
+#    value: { get_attr: [bastion_vm, console_urls, novnc] }
+#  bastion_vm_private_ip:
+#    description: Private IP address of bastion vm
+#    value: { get_attr: [ bastion_vm, first_address ] }
+  bastion_vm_public_ip:
+    description: Floating IP address of bastion vm
+    value: { get_attr: [ bastion_vm_floating_ip, floating_ip_address ] }
+  root_password:
+    description: root password
+    value: { get_attr: [ randstr, value ] }
